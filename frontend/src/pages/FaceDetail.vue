@@ -1,20 +1,24 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import { ElMessage } from 'element-plus';
 import { useFaceStore } from '../stores/faceStore';
 import { useGradeStore } from '../stores/gradeStore';
 import { useJointStore } from '../stores/jointStore';
+import { useSupportStore } from '../stores/supportStore';
 import { useGradeCalc } from '../hooks/useGradeCalc';
 import SketchCanvas from '../components/common/SketchCanvas.vue';
 import GradeTag from '../components/common/GradeTag.vue';
 import { attitudeText, formatChainage } from '../utils/geoMath';
 import { GRADE_SUPPORT } from '../types/grade';
+import { SUPPORT_STATUS_TAG, SUPPORT_STATUS_TEXT, type SupportOrder } from '../types/support';
 
 const route = useRoute();
 const router = useRouter();
 const faceStore = useFaceStore();
 const jointStore = useJointStore();
 const gradeStore = useGradeStore();
+const supportStore = useSupportStore();
 
 const faceId = computed(() => String(route.params.id ?? ''));
 const face = computed(() => faceStore.byId(faceId.value));
@@ -22,9 +26,37 @@ const joints = computed(() => jointStore.byFace(faceId.value));
 const grades = computed(() => gradeStore.byFace(faceId.value));
 const latest = computed(() => grades.value[0]);
 const previousGrade = computed(() => grades.value[1]);
+const supportOrders = computed(() => supportStore.byFace(faceId.value));
 
 const { result, patch } = useGradeCalc(() => joints.value);
 const segmentCount = ref(0);
+
+/** 完成施工对话框 */
+const completeDialog = ref(false);
+const completingId = ref('');
+const actualMeasure = ref('');
+const completedAt = ref<string>(String(Date.now()));
+
+function openComplete(row: SupportOrder): void {
+  completingId.value = row.id;
+  actualMeasure.value = row.actualMeasure ?? row.supportSuggestion;
+  completedAt.value = String(Date.now());
+  completeDialog.value = true;
+}
+
+async function confirmComplete(): Promise<void> {
+  if (!actualMeasure.value.trim()) {
+    ElMessage.warning('请填写实际施工措施');
+    return;
+  }
+  const done = await supportStore.complete(completingId.value, actualMeasure.value.trim(), Number(completedAt.value));
+  if (done) {
+    ElMessage.success('支护单已标记完成');
+    completeDialog.value = false;
+  } else {
+    ElMessage.error('该单据状态已变化，无法完成');
+  }
+}
 
 /** SketchCanvas 变更回调（用命名函数避免模板内联箭头参数丢类型） */
 function onSketchChange(segs: { id: string }[]): void {
@@ -47,6 +79,7 @@ onMounted(async () => {
   await faceStore.load();
   await jointStore.load();
   await gradeStore.load();
+  await supportStore.load();
   if (face.value) {
     patch({ rockStrength: face.value.rockStrength, spanWidth: Number(face.value.faceSize.split('×')[0]) || 12 });
   }
@@ -109,6 +142,49 @@ onMounted(async () => {
         </el-card>
 
         <el-card shadow="never">
+          <template #header><strong>支护单（{{ supportOrders.length }} 张）</strong></template>
+          <el-table :data="supportOrders" size="small" border>
+            <el-table-column label="状态" width="90">
+              <template #default="{ row }">
+                <el-tag :type="SUPPORT_STATUS_TAG[row.status as SupportOrder['status']]" size="small">
+                  {{ SUPPORT_STATUS_TEXT[row.status as SupportOrder['status']] }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="级别" width="70">
+              <template #default="{ row }"><GradeTag :grade="row.grade" /></template>
+            </el-table-column>
+            <el-table-column prop="supportSuggestion" label="建议措施" min-width="220" show-overflow-tooltip />
+            <el-table-column label="级别变化" width="100">
+              <template #default="{ row }">
+                <el-tag v-if="row.gradeChange" type="danger" size="small" effect="plain">{{ row.gradeChange }}</el-tag>
+                <span v-else class="muted">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="实际措施" min-width="200" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.actualMeasure ?? '—' }}</template>
+            </el-table-column>
+            <el-table-column label="完成日期" width="110">
+              <template #default="{ row }">
+                {{ row.completedAt ? new Date(row.completedAt).toLocaleDateString('zh-CN') : '—' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="开具时间" width="160">
+              <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString('zh-CN') }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="100" fixed="right">
+              <template #default="{ row }">
+                <el-button v-if="row.status === 'pending'" type="primary" size="small" @click="openComplete(row)">
+                  完成施工
+                </el-button>
+                <span v-else class="muted">—</span>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="supportOrders.length === 0" description="尚无支护单，保存围岩判定后自动开具" :image-size="60" />
+        </el-card>
+
+        <el-card shadow="never">
           <template #header><strong>节理组列表（{{ joints.length }} 组）</strong></template>
           <el-table :data="joints" size="small" border>
             <el-table-column label="组号" width="70">
@@ -143,6 +219,26 @@ onMounted(async () => {
         />
       </el-card>
     </div>
+
+    <el-dialog v-model="completeDialog" title="完成施工" width="480px">
+      <el-form label-width="90px">
+        <el-form-item label="实际措施">
+          <el-input
+            v-model="actualMeasure"
+            type="textarea"
+            :rows="3"
+            placeholder="填写实际实施的支护措施"
+          />
+        </el-form-item>
+        <el-form-item label="完成日期">
+          <el-date-picker v-model="completedAt" type="date" value-format="x" style="width: 100%" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="completeDialog = false">取消</el-button>
+        <el-button type="primary" @click="confirmComplete">确认完成</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 

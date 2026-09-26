@@ -5,9 +5,11 @@ import { ElMessage } from 'element-plus';
 import { useFaceStore } from '../stores/faceStore';
 import { useGradeStore } from '../stores/gradeStore';
 import { useJointStore } from '../stores/jointStore';
+import { useSupportStore } from '../stores/supportStore';
 import { useGradeCalc } from '../hooks/useGradeCalc';
 import GradeTag from '../components/common/GradeTag.vue';
 import { GROUNDWATERS, GRADE_SUPPORT, ROCK_GRADES, type Groundwater, type RockGrade } from '../types/grade';
+import { SUPPORT_STATUS_TEXT } from '../types/support';
 import { attitudeText, estimateJv, formatChainage } from '../utils/geoMath';
 
 const route = useRoute();
@@ -15,12 +17,14 @@ const router = useRouter();
 const faceStore = useFaceStore();
 const gradeStore = useGradeStore();
 const jointStore = useJointStore();
+const supportStore = useSupportStore();
 
 const faceId = computed(() => String(route.params.faceId ?? ''));
 const face = computed(() => faceStore.byId(faceId.value));
 const joints = computed(() => jointStore.byFace(faceId.value));
 const history = computed(() => gradeStore.byFace(faceId.value));
 const previous = computed(() => history.value[0]);
+const pendingOrder = computed(() => supportStore.pendingByFace(faceId.value));
 
 const { input, result, patch } = useGradeCalc(() => joints.value);
 const manual = ref(false);
@@ -52,7 +56,7 @@ async function save() {
     ElMessage.error('未找到该掌子面');
     return;
   }
-  await gradeStore.addGrade({
+  const record = await gradeStore.addGrade({
     faceId: face.value.id,
     grade: finalGrade.value,
     bqValue: result.value.bq,
@@ -66,13 +70,21 @@ async function save() {
     supportSuggestion: finalSupport.value,
     manualAdjusted: manual.value,
   });
-  ElMessage.success(`已保存 ${finalGrade.value} 级围岩判定`);
+  const { action } = await supportStore.issueFromGrade(record);
+  if (action === 'updated') {
+    ElMessage.success(`已保存 ${finalGrade.value} 级判定，并更新现有待施工支护单`);
+  } else if (action === 'reissued') {
+    ElMessage.success(`已保存判定：原待施工单转「需要复核」，已按 ${finalGrade.value} 级另开新支护单`);
+  } else {
+    ElMessage.success(`已保存 ${finalGrade.value} 级判定，并开具待施工支护单`);
+  }
 }
 
 onMounted(async () => {
   await faceStore.load();
   await jointStore.load();
   await gradeStore.load();
+  await supportStore.load();
   if (face.value) {
     patch({
       rockStrength: face.value.rockStrength,
@@ -146,6 +158,22 @@ onMounted(async () => {
           <el-divider />
           <p class="muted">{{ compareText }}</p>
           <el-button type="primary" @click="save">保存判定结果</el-button>
+        </el-card>
+
+        <el-card shadow="never">
+          <template #header><strong>当前待施工支护单</strong></template>
+          <div v-if="pendingOrder" class="order-box">
+            <div class="order-head">
+              <GradeTag :grade="pendingOrder.grade" />
+              <el-tag type="warning" size="small">{{ SUPPORT_STATUS_TEXT[pendingOrder.status] }}</el-tag>
+              <el-tag v-if="pendingOrder.gradeChange" type="danger" size="small" effect="plain">
+                级别变化 {{ pendingOrder.gradeChange }}
+              </el-tag>
+            </div>
+            <p class="support">{{ pendingOrder.supportSuggestion }}</p>
+            <p class="muted">开具于 {{ new Date(pendingOrder.createdAt).toLocaleString('zh-CN') }}，保存判定将更新或另开新单</p>
+          </div>
+          <p v-else class="muted">暂无待施工支护单，保存判定后自动开具</p>
         </el-card>
 
         <el-card shadow="never">
@@ -233,6 +261,17 @@ onMounted(async () => {
 .support {
   color: #2f3a46;
   margin: 6px 0;
+}
+.order-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.order-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .muted {
   color: #7b8592;

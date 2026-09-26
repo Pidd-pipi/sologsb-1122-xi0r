@@ -1,12 +1,13 @@
 import Dexie, { type Table } from 'dexie';
 import type { TunnelFace } from '../types/face';
 import type { JointSet } from '../types/joint';
-import type { RockMassGrade } from '../types/grade';
+import { GRADE_SUPPORT, type RockMassGrade } from '../types/grade';
 import type { WaterInflow } from '../types/water';
+import type { SupportOrder } from '../types/support';
 import { newId } from './id';
 
 export const DB_NAME = 'gbtunnelface';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const LS_VERSION_KEY = 'gbtunnelface:db-version';
 
 class TunnelFaceDB extends Dexie {
@@ -14,6 +15,7 @@ class TunnelFaceDB extends Dexie {
   joints!: Table<JointSet, string>;
   grades!: Table<RockMassGrade, string>;
   waters!: Table<WaterInflow, string>;
+  supports!: Table<SupportOrder, string>;
 
   constructor() {
     super(DB_NAME);
@@ -52,6 +54,14 @@ class TunnelFaceDB extends Dexie {
             if (row.chainage === undefined) row.chainage = 0;
           });
       });
+    // v3：新增支护单表，判定保存后生成可追踪的待施工单
+    this.version(3).stores({
+      faces: 'id, faceNo, chainage, lithology, excavationMethod, weathering, recordedAt',
+      joints: 'id, faceId, setNo, dipDirection, dipAngle, fillMaterial',
+      grades: 'id, faceId, grade, judgedAt, bqValue',
+      waters: 'id, faceId, chainage, type, changeTrend',
+      supports: 'id, faceId, status, grade, createdAt',
+    });
   }
 }
 
@@ -93,6 +103,7 @@ export async function ensureSeedData(): Promise<void> {
 
   const face1 = newId('face');
   const face2 = newId('face');
+  const grade1 = newId('grade');
 
   const faces: TunnelFace[] = [
     {
@@ -186,7 +197,7 @@ export async function ensureSeedData(): Promise<void> {
 
   const grades: RockMassGrade[] = [
     {
-      id: newId('grade'),
+      id: grade1,
       faceId: face1,
       grade: 'Ⅲ',
       bqValue: 358,
@@ -197,9 +208,22 @@ export async function ensureSeedData(): Promise<void> {
       spanWidth: 12.6,
       correction: 0.1,
       correctedBq: 348,
-      supportSuggestion: '系统锚杆（φ25，L=3.0 m，间距 1.0 m）+ 喷射混凝土 12 cm + 钢筋网',
+      supportSuggestion: GRADE_SUPPORT['Ⅲ'],
       manualAdjusted: false,
       judgedAt: now - 2 * day,
+    },
+  ];
+
+  const supports: SupportOrder[] = [
+    {
+      id: newId('support'),
+      faceId: face1,
+      gradeId: grade1,
+      grade: 'Ⅲ',
+      supportSuggestion: GRADE_SUPPORT['Ⅲ'],
+      status: 'pending',
+      createdAt: now - 2 * day,
+      updatedAt: now - 2 * day,
     },
   ];
 
@@ -242,10 +266,11 @@ export async function ensureSeedData(): Promise<void> {
     },
   ];
 
-  await db.transaction('rw', db.faces, db.joints, db.grades, db.waters, async () => {
+  await db.transaction('rw', db.faces, db.joints, db.grades, db.waters, db.supports, async () => {
     await db.faces.bulkPut(faces);
     await db.joints.bulkPut(joints);
     await db.grades.bulkPut(grades);
     await db.waters.bulkPut(waters);
+    await db.supports.bulkPut(supports);
   });
 }
