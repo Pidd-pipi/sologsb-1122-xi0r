@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus';
 import { useFaceStore } from '../stores/faceStore';
 import { useGradeStore } from '../stores/gradeStore';
 import { useJointStore } from '../stores/jointStore';
+import { useSupportStore } from '../stores/supportStore';
 import { useGradeCalc } from '../hooks/useGradeCalc';
 import GradeTag from '../components/common/GradeTag.vue';
 import { GROUNDWATERS, GRADE_SUPPORT, ROCK_GRADES, type Groundwater, type RockGrade } from '../types/grade';
@@ -15,12 +16,16 @@ const router = useRouter();
 const faceStore = useFaceStore();
 const gradeStore = useGradeStore();
 const jointStore = useJointStore();
+const supportStore = useSupportStore();
 
 const faceId = computed(() => String(route.params.faceId ?? ''));
 const face = computed(() => faceStore.byId(faceId.value));
 const joints = computed(() => jointStore.byFace(faceId.value));
 const history = computed(() => gradeStore.byFace(faceId.value));
 const previous = computed(() => history.value[0]);
+/** 当前待施工支护单（同一掌子面最多一张） */
+const pendingOrder = computed(() => supportStore.pendingByFace(faceId.value)[0]);
+const reviewCount = computed(() => supportStore.reviewByFace(faceId.value).length);
 
 const { input, result, patch } = useGradeCalc(() => joints.value);
 const manual = ref(false);
@@ -39,6 +44,26 @@ const compareText = computed(() => {
     : `较上循环变好 ${-delta} 级：${previous.value.grade} → ${finalGrade.value}`;
 });
 
+/** 保存对支护单的影响提示 */
+const saveHint = computed<{ type: 'warning' | 'success' | 'info'; text: string }>(() => {
+  const current = pendingOrder.value;
+  if (!current) {
+    return { type: 'success', text: '保存判定后将自动开具一张待施工支护单，下发施工班组执行' };
+  }
+  if (current.grade === finalGrade.value) {
+    return {
+      type: 'info',
+      text: `已有待施工支护单 #${current.seq}（${current.grade} 级）：保存后刷新该单建议，不会重复开单`,
+    };
+  }
+  const delta = ROCK_GRADES.indexOf(finalGrade.value) - ROCK_GRADES.indexOf(current.grade);
+  const dir = delta > 0 ? `变差 ${delta} 级` : `变好 ${-delta} 级`;
+  return {
+    type: 'warning',
+    text: `级别${dir}（${current.grade} → ${finalGrade.value}）：支护单 #${current.seq} 将转入「需要复核」，另开新待施工单并标明级别变化，已完成记录不受影响`,
+  };
+});
+
 watch(
   () => result.value.grade,
   (g) => {
@@ -47,32 +72,45 @@ watch(
   { immediate: true },
 );
 
+const saving = ref(false);
+
 async function save() {
   if (!face.value) {
     ElMessage.error('未找到该掌子面');
     return;
   }
-  await gradeStore.addGrade({
-    faceId: face.value.id,
-    grade: finalGrade.value,
-    bqValue: result.value.bq,
-    rqd: input.value.rqd,
-    jv: result.value.jv,
-    kv: input.value.kv,
-    groundwater: input.value.groundwater,
-    spanWidth: input.value.spanWidth,
-    correction: Number((result.value.k1 + result.value.k2 + input.value.extraCorrection).toFixed(3)),
-    correctedBq: result.value.correctedBq,
-    supportSuggestion: finalSupport.value,
-    manualAdjusted: manual.value,
-  });
-  ElMessage.success(`已保存 ${finalGrade.value} 级围岩判定`);
+  saving.value = true;
+  try {
+    const { order, outcome } = await supportStore.saveJudgement({
+      faceId: face.value.id,
+      grade: finalGrade.value,
+      bqValue: result.value.bq,
+      rqd: input.value.rqd,
+      jv: result.value.jv,
+      kv: input.value.kv,
+      groundwater: input.value.groundwater,
+      spanWidth: input.value.spanWidth,
+      correction: Number((result.value.k1 + result.value.k2 + input.value.extraCorrection).toFixed(3)),
+      correctedBq: result.value.correctedBq,
+      supportSuggestion: finalSupport.value,
+      manualAdjusted: manual.value,
+    });
+    if (outcome === 'updated') {
+      ElMessage.success(`已保存判定，待施工支护单 #${order.seq} 已更新`);
+    } else {
+      ElMessage.success(`已保存 ${finalGrade.value} 级判定，开具支护单 #${order.seq}`);
+    }
+    router.push(`/faces/${face.value.id}`);
+  } finally {
+    saving.value = false;
+  }
 }
 
 onMounted(async () => {
   await faceStore.load();
   await jointStore.load();
   await gradeStore.load();
+  await supportStore.load();
   if (face.value) {
     patch({
       rockStrength: face.value.rockStrength,
@@ -87,6 +125,10 @@ onMounted(async () => {
     <div class="header">
       <h2>围岩级别判定 · {{ face?.faceNo ?? '未知' }}</h2>
       <GradeTag :grade="finalGrade" />
+      <el-tag v-if="pendingOrder" type="warning" effect="plain">
+        待施工支护单 #{{ pendingOrder.seq }}（{{ pendingOrder.grade }} 级）
+      </el-tag>
+      <el-tag v-else type="success" effect="plain">暂无待施工单</el-tag>
       <el-tag type="info" effect="plain">节理 {{ joints.length }} 组 · 自动 Jv {{ estimateJv(joints) }}</el-tag>
       <div class="spacer" />
       <el-button @click="router.push(`/faces/${faceId}`)">返回掌子面详情</el-button>
@@ -145,7 +187,22 @@ onMounted(async () => {
           </el-radio-group>
           <el-divider />
           <p class="muted">{{ compareText }}</p>
-          <el-button type="primary" @click="save">保存判定结果</el-button>
+          <el-alert
+            :type="saveHint.type"
+            :title="saveHint.text"
+            :closable="false"
+            show-icon
+            style="margin: 8px 0"
+          />
+          <el-alert
+            v-if="reviewCount > 0"
+            type="error"
+            :title="`该掌子面还有 ${reviewCount} 张支护单等待复核，请在详情页确认旧单是否已施工`"
+            :closable="false"
+            show-icon
+            style="margin: 8px 0"
+          />
+          <el-button type="primary" :loading="saving" @click="save">保存判定结果并更新支护单</el-button>
         </el-card>
 
         <el-card shadow="never">

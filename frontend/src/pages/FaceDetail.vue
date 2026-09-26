@@ -4,17 +4,21 @@ import { useRoute, useRouter } from 'vue-router';
 import { useFaceStore } from '../stores/faceStore';
 import { useGradeStore } from '../stores/gradeStore';
 import { useJointStore } from '../stores/jointStore';
+import { useSupportStore } from '../stores/supportStore';
 import { useGradeCalc } from '../hooks/useGradeCalc';
 import SketchCanvas from '../components/common/SketchCanvas.vue';
 import GradeTag from '../components/common/GradeTag.vue';
+import SupportOrderDrawer from '../components/common/SupportOrderDrawer.vue';
 import { attitudeText, formatChainage } from '../utils/geoMath';
 import { GRADE_SUPPORT } from '../types/grade';
+import { SUPPORT_STATUS_LABEL, type SupportOrder } from '../types/support';
 
 const route = useRoute();
 const router = useRouter();
 const faceStore = useFaceStore();
 const jointStore = useJointStore();
 const gradeStore = useGradeStore();
+const supportStore = useSupportStore();
 
 const faceId = computed(() => String(route.params.id ?? ''));
 const face = computed(() => faceStore.byId(faceId.value));
@@ -22,6 +26,29 @@ const joints = computed(() => jointStore.byFace(faceId.value));
 const grades = computed(() => gradeStore.byFace(faceId.value));
 const latest = computed(() => grades.value[0]);
 const previousGrade = computed(() => grades.value[1]);
+
+const pendingOrders = computed(() => supportStore.pendingByFace(faceId.value));
+const reviewOrders = computed(() => supportStore.reviewByFace(faceId.value));
+const historyOrders = computed(() => supportStore.historyByFace(faceId.value));
+
+const drawerVisible = ref(false);
+const activeOrder = ref<SupportOrder | null>(null);
+
+function openOrder(order: SupportOrder): void {
+  activeOrder.value = order;
+  drawerVisible.value = true;
+}
+
+/** 抽屉中处理（完成/作废）后，从最新内存状态回填当前单据 */
+function onOrderHandled(): void {
+  if (activeOrder.value) {
+    activeOrder.value = supportStore.orders.find((it) => it.id === activeOrder.value?.id) ?? activeOrder.value;
+  }
+}
+
+function formatDate(value?: number): string {
+  return value ? new Date(value).toLocaleDateString('zh-CN') : '—';
+}
 
 const { result, patch } = useGradeCalc(() => joints.value);
 const segmentCount = ref(0);
@@ -47,6 +74,7 @@ onMounted(async () => {
   await faceStore.load();
   await jointStore.load();
   await gradeStore.load();
+  await supportStore.load();
   if (face.value) {
     patch({ rockStrength: face.value.rockStrength, spanWidth: Number(face.value.faceSize.split('×')[0]) || 12 });
   }
@@ -109,6 +137,112 @@ onMounted(async () => {
         </el-card>
 
         <el-card shadow="never">
+          <template #header>
+            <div class="card-head">
+              <strong>支护单跟踪</strong>
+              <el-tag size="small" type="warning">待施工 {{ pendingOrders.length }}</el-tag>
+              <el-tag size="small" type="danger">需复核 {{ reviewOrders.length }}</el-tag>
+              <el-tag size="small" type="success">已完成 {{ historyOrders.filter((o) => o.status === 'done').length }}</el-tag>
+              <el-tag size="small" type="info" effect="plain">已作废 {{ historyOrders.filter((o) => o.status === 'voided').length }}</el-tag>
+            </div>
+          </template>
+
+          <!-- 需要复核 -->
+          <div v-for="order in reviewOrders" :key="order.id" class="order review-box" @click="openOrder(order)">
+            <div class="order-line">
+              <el-tag type="danger" size="small">需要复核</el-tag>
+              <strong>#{{ order.seq }}</strong>
+              <GradeTag :grade="order.grade" />
+              <span class="muted">{{ order.gradeChangeNote }}</span>
+            </div>
+            <p class="order-measures">{{ order.suggestedMeasures }}</p>
+            <div class="order-line">
+              <span class="muted">开单 {{ new Date(order.issuedAt).toLocaleString('zh-CN') }}</span>
+              <el-button link type="primary" size="small">去复核处理</el-button>
+            </div>
+          </div>
+
+          <!-- 待施工（同面最多一张） -->
+          <div
+            v-for="order in pendingOrders"
+            :key="order.id"
+            class="order pending-box"
+            @click="openOrder(order)"
+          >
+            <div class="order-line">
+              <el-tag type="warning" size="small">待施工</el-tag>
+              <strong>#{{ order.seq }}</strong>
+              <GradeTag :grade="order.grade" />
+              <el-tag
+                v-if="order.gradeChange === 'worse'"
+                type="danger"
+                size="small"
+                effect="plain"
+              >
+                {{ order.gradeChangeNote }}
+              </el-tag>
+              <el-tag v-else-if="order.gradeChange === 'better'" type="success" size="small" effect="plain">
+                {{ order.gradeChangeNote }}
+              </el-tag>
+              <el-tag v-else-if="order.gradeChange === 'first'" type="primary" size="small" effect="plain">
+                首张支护单
+              </el-tag>
+            </div>
+            <p class="order-measures">{{ order.suggestedMeasures }}</p>
+            <div class="order-line">
+              <span class="muted">开单 {{ new Date(order.issuedAt).toLocaleString('zh-CN') }}</span>
+              <el-button link type="primary" size="small">登记完成</el-button>
+            </div>
+          </div>
+
+          <el-alert
+            v-if="pendingOrders.length === 0 && reviewOrders.length === 0 && historyOrders.length === 0"
+            type="info"
+            :closable="false"
+            title="尚无支护单：保存围岩级别判定后自动生成待施工支护单"
+            style="margin-bottom: 8px"
+          />
+          <el-alert
+            v-else-if="pendingOrders.length === 0 && reviewOrders.length === 0"
+            type="success"
+            :closable="false"
+            title="当前无待施工支护单"
+            style="margin-bottom: 8px"
+          />
+
+          <!-- 历史单：已完成 / 已作废 -->
+          <el-table
+            v-if="historyOrders.length > 0"
+            :data="historyOrders"
+            size="small"
+            border
+            class="history-table"
+            @row-click="openOrder"
+          >
+            <el-table-column label="单号" width="64">
+              <template #default="{ row }">#{{ row.seq }}</template>
+            </el-table-column>
+            <el-table-column label="状态" width="86">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.status === 'done' ? 'success' : 'info'">
+                  {{ SUPPORT_STATUS_LABEL[row.status as 'done' | 'voided'] }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="级别" width="78">
+              <template #default="{ row }"><GradeTag :grade="row.grade" /></template>
+            </el-table-column>
+            <el-table-column prop="crew" label="施工班组" width="96" />
+            <el-table-column label="完成日期" width="104">
+              <template #default="{ row }">{{ formatDate(row.completedAt) }}</template>
+            </el-table-column>
+            <el-table-column label="级别变化 / 备注" min-width="160" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.reviewNote || row.gradeChangeNote }}</template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+
+        <el-card shadow="never">
           <template #header><strong>节理组列表（{{ joints.length }} 组）</strong></template>
           <el-table :data="joints" size="small" border>
             <el-table-column label="组号" width="70">
@@ -143,6 +277,13 @@ onMounted(async () => {
         />
       </el-card>
     </div>
+
+    <SupportOrderDrawer
+      v-model="drawerVisible"
+      :order="activeOrder"
+      :review-context="activeOrder?.status === 'review'"
+      @handled="onOrderHandled"
+    />
   </div>
 </template>
 
@@ -194,5 +335,39 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+.order {
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.order:hover {
+  border-color: #c0c4cc;
+}
+.pending-box {
+  border-left: 4px solid #e6a23c;
+  background: #fdf8f0;
+}
+.review-box {
+  border-left: 4px solid #f56c6c;
+  background: #fef4f4;
+}
+.order-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.order-measures {
+  margin: 6px 0;
+  font-size: 13px;
+  color: #2f3a46;
+  line-height: 1.6;
+}
+.history-table {
+  cursor: pointer;
 }
 </style>

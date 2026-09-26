@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus';
 import { useFaceStore } from '../stores/faceStore';
 import { useGradeStore } from '../stores/gradeStore';
 import { useJointStore } from '../stores/jointStore';
+import { useSupportStore } from '../stores/supportStore';
 import { useFaceFilter } from '../hooks/useFaceFilter';
 import FaceCard from '../components/common/FaceCard.vue';
 import GradeTag from '../components/common/GradeTag.vue';
@@ -23,6 +24,7 @@ const router = useRouter();
 const faceStore = useFaceStore();
 const gradeStore = useGradeStore();
 const jointStore = useJointStore();
+const supportStore = useSupportStore();
 const { filters, result, options, gradeDistribution, reset } = useFaceFilter();
 
 const dialogVisible = ref(false);
@@ -98,6 +100,7 @@ onMounted(async () => {
   await faceStore.load();
   await gradeStore.load();
   await jointStore.load();
+  await supportStore.load();
 });
 </script>
 
@@ -169,6 +172,8 @@ onMounted(async () => {
         :grade="row.grade"
         :joint-count="jointStore.byFace(row.face.id).length"
         :water-count="gradeStore.watersByFace(row.face.id).length"
+        :pending-support-count="supportStore.pendingByFace(row.face.id).length"
+        :review-support-count="supportStore.reviewByFace(row.face.id).length"
         :footer="`编录时间 ${new Date(row.lastRecordedAt).toLocaleString('zh-CN')}`"
         @open="(id) => router.push(`/faces/${id}`)"
       />

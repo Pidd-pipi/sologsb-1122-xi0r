@@ -9,6 +9,8 @@ defineProps<{
   grade?: RockGrade;
   jointCount?: number;
   waterCount?: number;
+  pendingSupportCount?: number;
+  reviewSupportCount?: number;
   footer?: string;
 }>();
 
@@ -34,6 +36,11 @@ const emit = defineEmits<{
       {{ face.faceSize }} m
     </div>
     <div class="line">节理组 {{ jointCount ?? 0 }} 组 · 涌水记录 {{ waterCount ?? 0 }} 条 · 地质员 {{ face.geologist }}</div>
+    <div class="line">
+      <el-tag v-if="pendingSupportCount" size="small" type="warning">待施工支护单 {{ pendingSupportCount }}</el-tag>
+      <el-tag v-if="reviewSupportCount" size="small" type="danger">需复核 {{ reviewSupportCount }}</el-tag>
+      <span v-if="!pendingSupportCount && !reviewSupportCount" class="muted">无待处理支护单</span>
+    </div>
     <div class="line muted">最近编录 {{ new Date(face.recordedAt).toLocaleString('zh-CN') }}</div>
     <div v-if="footer" class="line footer">{{ footer }}</div>
   </el-card>
